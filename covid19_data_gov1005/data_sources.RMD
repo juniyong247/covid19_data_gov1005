@@ -12,9 +12,9 @@ library(readr)
 library(rvest)
 library(janitor)
 library(skimr)
-library(sf)
-library(maps)
-library(tibble)
+# library(sf)
+# library(maps)
+# library(tibble)
 library(countrycode)
 library(rworldmap)
 library(gganimate)
@@ -76,40 +76,32 @@ us_daily_reports <- read.csv(url("https://raw.githubusercontent.com/CSSEGISandDa
 
 # Webscrape Worldometer Data
 
+# Webscrape Worldometer Data
+
 worldometer_url <- paste0("https://www.worldometers.info/coronavirus/")
 h <- read_html(worldometer_url)
-table <- h %>% 
-               html_nodes("table")
+table <- h %>% html_nodes("table")
 worldometer <- table[[1]] %>% html_table
-worldometer_data <- worldometer %>% 
+
+
+world <- worldometer %>% 
   clean_names() %>%
   mutate_at(c("total_cases", "total_deaths", "total_recovered", "total_tests", "tests_1m_pop"), parse_number) %>%
   filter(! country_other %in% c("World", "Total:", "Europe", "North America", "Asia", "South America", 
                                 "Africa", "Oceania", "")) %>%
-  select("country_other", "total_cases", "total_deaths", "total_recovered", "total_tests", "tests_1m_pop") %>%
+  mutate(incidence = case_when(
+    total_cases > 100000 ~ "100,000+ Cases",
+    total_cases >= 10000 ~ "10,000+ Cases",
+    total_cases >= 1000 ~ "1,000+ Cases",
+    TRUE ~ "Less than 1000+ Cases"
+  ),
+  population_estimate = (total_tests * 1000000) / tests_1m_pop,
+         per_capita_cases = total_cases / population_estimate,
+         per_capita_tests = total_tests / population_estimate) %>%
+  select("country_other", "population_estimate", "total_cases", "total_deaths", "total_recovered", "total_tests", "tests_1m_pop", incidence) %>%
   arrange(desc(total_cases))
-# 
-# # Clean worldometer data, changing column types to reflect numbers where
-# # necessary.
-# 
-# worldometer_new <- worldometer %>%
-#   mutate_all(parse_number)
-# 
-# worldometer_data <- worldometer %>%
-#   mutate(total_cases_updated = parse_number(total_cases),
-#          new_cases_updated = parse_number(new_cases),
-#          total_deaths_updated = parse_number(total_deaths),
-#          new_deaths_updated = parse_number(new_deaths),
-#          total_recovered_updated = parse_number(total_recovered),
-#          active_cases_updated = parse_number(active_cases),
-#          serious_critical_updated = parse_number(serious_critical),
-#          total_tests_updated = parse_number(total_tests),
-#          tests_1m_pop_updated = parse_number(tests_1m_pop)) %>%
-#          filter(! country_other %in% c("World", "Total:", "Europe", "North America", "Asia", "South America",
-#                                 "Africa", "Oceania", "")) %>%
-#         arrange(desc(total_cases_updated))
 
-saveRDS(worldometer_data, file = "worldometer.RDS")
+saveRDS(world, file = "worldometer.RDS")
 ```
 
 ```{r Spread with Increments, echo=FALSE}
@@ -479,4 +471,63 @@ stock_cases <- policy %>%
 saveRDS(stock_cases, file = "stock_cases.RDS")
 ```
 
+```{r}
+
+    stringency_model <- policy %>%
+          select(Country, new_date, recovered, region, StringencyIndexForDisplay) %>%
+          filter(!is.na(StringencyIndexForDisplay), new_date == "2020-05-01") %>%
+          rep_sample_n(size = nrow(policy), replace = TRUE, reps = 3) %>%
+          group_by(replicate, region) %>%
+          nest() %>%
+          mutate(mod = map(data, ~ lm(StringencyIndexForDisplay ~ recovered, data = .)),
+                 reg_results = map(mod, ~ tidy(., conf.int = TRUE)),
+                 disp_coef = map_dbl(reg_results, ~ filter(., term == "recovered") %>% pull(estimate)))
+        # lower_bound = map_dbl(reg_results, ~ filter(., term == "total_tests") %>% pull(conf.low)),
+        # upper_bound = map_dbl(reg_results, ~ filter(., term == "total_tests") %>% pull(conf.high)))
+        
+        Americas <- stringency_model %>%
+          select(replicate, region, disp_coef) %>%
+          filter(region == "Americas") %>%
+          pull(disp_coef) %>%
+          quantile(c(0.025, 0.5, 0.975))
+        
+        Africa <- stringency_model %>%
+          select(replicate, region, disp_coef) %>%
+          filter(region == "Africa") %>%
+          pull(disp_coef) %>%
+          quantile(c(0.025, 0.5, 0.975))
+        
+        Europe <- stringency_model %>%
+          select(replicate, region, disp_coef) %>%
+          filter(region == "Europe") %>%
+          pull(disp_coef) %>%
+          quantile(c(0.025, 0.5, 0.975))
+        
+        Asia <- stringency_model %>%
+          select(replicate, region, disp_coef) %>%
+          filter(region == "Asia") %>%
+          pull(disp_coef) %>%
+          quantile(c(0.025, 0.5, 0.975))
+        
+        Oceania <- stringency_model %>%
+          select(replicate, region, disp_coef) %>%
+          filter(region == "Oceania") %>%
+          pull(disp_coef) %>%
+          quantile(c(0.025, 0.5, 0.975))
+        
+        Other <- stringency_model %>% 
+          select(replicate, region, disp_coef) %>%
+          filter(is.na(region)) %>%
+          pull(disp_coef) %>%
+          quantile(c(0.025, 0.5, 0.975))
+        
+        updated_policy_tibble <- tibble(index = "Americas", conf_low = Americas[1], point_estimate = Americas[2], conf_high = Americas[3]) %>%
+          add_row(index = "Africa", conf_low = Africa[1], point_estimate = Africa[2], conf_high = Africa[3]) %>%
+          add_row(index = "Europe", conf_low = Europe[1], point_estimate = Europe[2], conf_high = Europe[3]) %>%
+          add_row(index = "Asia", conf_low = Asia[1], point_estimate = Asia[2], conf_high = Asia[3]) %>% 
+          add_row(index = "Oceania", conf_low = Oceania[1], point_estimate = Oceania[2], conf_high = Oceania[3]) %>% 
+          add_row(index = "Other, including US and UK", conf_low = Other[1], point_estimate = Other[2], conf_high = Other[3])
+
+
+```
 
